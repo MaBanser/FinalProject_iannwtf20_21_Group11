@@ -10,30 +10,31 @@ class MultiHeadAttention(Layer):
         self.num_heads = num_heads
         self.model_dim = model_dim
         
-        assert model_dim % num_heads == 0
+        # Make sure model dimension can be divided by the number of attention heads
+        assert model_dim % num_heads == 0, 'model_dim needs to be divisible by num_heads'
 
         self.head_dim = model_dim // num_heads
 
+        # Create Query, Key and Value matrix
         self.wq = tf.keras.layers.Dense(model_dim)
         self.wk = tf.keras.layers.Dense(model_dim)
         self.wv = tf.keras.layers.Dense(model_dim)
 
+        # Create output matrix
         self.wo = tf.keras.layers.Dense(model_dim)
 
     def split_heads(self, x, batch_size):
         x = tf.reshape(x, (batch_size, -1, self.num_heads, self.head_dim))
+        # Transpose so that output has shape (batch_size, num_head, seq_len, head_dim)
         return tf.transpose(x, perm=[0, 2, 1, 3])
 
-    def call(self, x, mask, **kwargs):
-        batch_size = x.shape[0]
+    def call(self, value, key, query, mask):
+        batch_size = query.shape[0]
 
-        query = self.wq(x)  # (batch_size, seq_len, model_dim)
-        if 'encoder_out' in kwargs:
-            key = self.wk(kwargs['encoder_out'])
-            value = self.wv(kwargs['encoder_out'])
-        else:
-            key = self.wk(x)
-            value = self.wv(x)
+        # shape == (batch_size, seq_len, model_dim)
+        query = self.wq(query)
+        key = self.wk(key)
+        value = self.wv(value)
 
         # Split up the heads
         query = self.split_heads(query, batch_size)
@@ -67,10 +68,12 @@ class EncoderLayer(Layer):
         self.layernorm_2 = tf.keras.layers.LayerNormalization()
     
     def call(self, x, mask, training = False):
-        attention_out, _ = self.attention(x, mask)
+        # Self-Attention block with residual connection
+        attention_out, _ = self.attention(x, x, x, mask)
         attention_out = self.dropout_1(attention_out,training=training)
         x = self.layernorm_1(x + attention_out)
 
+        # Feed-Forward block with residual connection
         feedForward_out = x
         for layer in self.feedForward:
             feedForward_out = layer(feedForward_out)
@@ -99,14 +102,17 @@ class DecoderLayer(Layer):
         self.layernorm_3 = tf.keras.layers.LayerNormalization()
     
     def call(self, x, enc_out, mask, training = False):
-        attention_out, _ = self.attention(x, mask)
+        # Self-Attention block with residual connection
+        attention_out, _ = self.attention(x, x, x, mask)
         attention_out = self.dropout_1(attention_out,training=training)
         x = self.layernorm_1(x + attention_out)
 
-        enc_dec_attention_out, attention_weights = self.enc_dec_attention(x, mask=None, encoder_out=enc_out)
+        # Encoder-Decoder Attention block with residual connection
+        enc_dec_attention_out, attention_weights = self.enc_dec_attention(enc_out, enc_out, x, mask=None)
         enc_dec_attention_out = self.dropout_2(enc_dec_attention_out,training=training)
         x = self.layernorm_2(x + enc_dec_attention_out)
 
+        # Feed-Forward block with residual connection
         feedForward_out = x
         for layer in self.feedForward:
             feedForward_out = layer(feedForward_out)
@@ -129,15 +135,20 @@ class Encoder(Layer):
     def call(self, x, mask, training=False):
         batch_size = x.shape[0]
 
+        # Reshape the input so that the image patches are in one sequence
+        # (batch_size, horizontal_patches, vertical_patches, pixels) -> (batch_size, patches, pixels)
         x = tf.reshape(x,(batch_size,-1, x.shape[-1]))
 
         seq_len = x.shape[1]
 
+        # Embed input in model_dim and add positional encoding 
         x = self.embedding(x)
         x *= tf.math.sqrt(tf.cast(self.model_dim, tf.float32))
         x += self.pos_encoding[:, :seq_len, :]
+
         x = self.dropout(x, training=training)
 
+        # Go through the encoder layers
         for layer in self.enc_layers:
             x = layer(x, mask, training)
 
@@ -158,12 +169,14 @@ class Decoder(Layer):
         seq_len = x.shape[1]
         attention_weights = {}
         
+        # Embed input in model_dim and add positional encoding 
         x = self.embedding(x)
         x *= tf.math.sqrt(tf.cast(self.model_dim, tf.float32))
         x += self.pos_encoding[:, :seq_len]
 
         x = self.dropout(x, training=training)
 
+        # Go through the decoder layers
         for i, layer in enumerate(self.dec_layers):
             x, enc_dec_attention = layer(x, enc_out, mask, training)
             
@@ -178,6 +191,7 @@ class Transformer(Model):
         self.encoder = Encoder(num_enc_layers, model_dim, num_heads, ffn_units, enc_seq_len, dropout_rate)
         self.decoder = Decoder(vocab_size, num_dec_layers, model_dim, num_heads, ffn_units, dec_seq_len, dropout_rate)
 
+        # Output logit scores for the vocabulary
         self.output_layer = tf.keras.layers.Dense(vocab_size)
     
     def call(self, input, mask=None, training=False):

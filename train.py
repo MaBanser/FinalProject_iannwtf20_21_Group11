@@ -98,7 +98,9 @@ def train_model(model, train_dataset, val_dataset, optimizer, loss_object, num_e
 
 @tf.function
 def train_step(model, input_seq, target_seq, look_ahead_mask, loss_object, optimizer):
+    # target_seq_prior is the input for the decoder utilizing teacher-forcing, it does not contain the <end> token
     target_seq_prior = target_seq[:, :-1]
+    # target_seq_posterior is the target output, it does not contain the <start> token
     target_seq_posterior = target_seq[:, 1:]
 
     with tf.GradientTape() as tape:
@@ -109,15 +111,18 @@ def train_step(model, input_seq, target_seq, look_ahead_mask, loss_object, optim
     optimizer.apply_gradients(zip(gradients, model.trainable_variables))
     return loss
 
+@tf.function
 def test_step(model, input_seq, target_seq, loss_object, tokenizer):
     batch_size = target_seq.shape[0]
     output = tf.expand_dims(tf.repeat([tokenizer.word_index['<start>']],batch_size), 1)
     for _ in range(dec_seq_len):
         mask = utils.look_ahead_mask(output.shape[1])
-        pred, _ = model((input_seq, output), mask, training=True)
+        pred, _ = model((input_seq, output), mask)
 
+        # Take the last decoder output
         pred = pred[:, -1:, :]
 
+        # Get the predicted word
         predicted_id = tf.argmax(pred, axis=-1, output_type=tf.int32)
 
         try:
@@ -125,6 +130,7 @@ def test_step(model, input_seq, target_seq, loss_object, tokenizer):
         except:
             softmax_pred = pred
                 
+        # Add latest prediction to the output sequence
         output = tf.concat([output, predicted_id], axis=-1)
     
     loss = loss_function(target_seq[:, 1:], softmax_pred, loss_object)
@@ -148,24 +154,24 @@ def loss_function(target, pred, loss_object):
 
 if __name__ == "__main__":
 
-    num_patches_h = 8
-    num_patches_v = 8
+    num_patches_h = 4
+    num_patches_v = 4
     vocab_size = 5000
 
-    train_dataset, val_dataset, max_seq_len, tokenizer = preprocessing.get_datasets(image_dim=(200, 200), num_patches_h = num_patches_h, num_patches_v = num_patches_v, vocab_size = vocab_size)
+    train_dataset, val_dataset, max_seq_len, tokenizer = preprocessing.get_datasets(image_dim=(64, 64), num_patches_h = num_patches_h, num_patches_v = num_patches_v, vocab_size = vocab_size)
 
-    loss_object = tf.keras.losses.SparseCategoricalCrossentropy(reduction='none')
+    loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
 
     tf.keras.backend.clear_session()
 
-    num_enc_layers = 8
-    num_dec_layers = 8
-    model_dim = 512
-    num_heads = 8
-    ffn_units = 2048
+    num_enc_layers = 6
+    num_dec_layers = 2
+    model_dim = 32
+    num_heads = 4
+    ffn_units = 64
     enc_seq_len = num_patches_h*num_patches_v
     dec_seq_len = max_seq_len - 1
-    dropout_rate = 0.1
+    dropout_rate = 0.3
     epochs = 20
 
     learning_rate = CustomSchedule(model_dim)
@@ -179,8 +185,8 @@ if __name__ == "__main__":
 
     train_model(
         model = captioning_model,
-        train_dataset = train_dataset.take(2),
-        val_dataset = val_dataset.take(1),
+        train_dataset = train_dataset,
+        val_dataset = val_dataset,
         optimizer = optimizer,
         loss_object = loss_object,
         num_epochs = epochs,
